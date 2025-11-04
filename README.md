@@ -339,6 +339,115 @@ cd ./bin
 ```
 
 
+### Run for iOS (Xcode)
+
+构建 iOS 静态库并在 iOS 工程中集成：
+
+#### 1) 构建静态库
+
+在 macOS 上使用 Xcode 生成器为 iOS 设备编译静态库（关闭 OpenMP 与 OpenCL）：
+
+```bash
+cd /path/to/mllm
+cmake -S . -B build_ios -G Xcode \
+  -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+  -DMLLM_OPENMP=OFF \
+  -DOPENCL=OFF \
+  -DQNN=OFF \
+  -DMLLM_BUILD_XNNPACK_BACKEND=OFF
+
+# 生成静态库（Release）
+cmake --build build_ios --config Release
+```
+
+生成后可在 `build_ios/Release` 下找到以下静态库（名称可能随配置略有不同）：
+
+- `libmllm_llm.a`
+- `libmllm_vlm.a`（如需多模态）
+- 以及 CPU 后端对象库产物（由 CMake 组织到最终 app 链接中）
+
+说明：
+- iOS/Apple Clang 不启用 OpenMP，项目已在 macOS/iOS 默认关闭 OpenMP；代码里已提供 `OmpCompat` 兼容层，禁用 OpenMP 时将以单线程回退运行。
+- OpenCL/Metal 在 iOS 上不启用，建议仅使用 CPU 后端。
+
+#### 2) 集成到你的 iOS 工程
+
+- 在 Xcode 的 App Target 中，添加上一步生成的静态库（`libmllm_llm.a`、需要时加 `libmllm_vlm.a`）。
+- 将头文件路径加入 Header Search Paths：
+  - `$(PROJECT_DIR)/mllm`
+  - `$(PROJECT_DIR)/mllm/backends/cpu`
+  - `$(PROJECT_DIR)/third_party/fmt/include`（CMake 子项目已包含，通常 header-only 即可）
+- 确保使用 `libc++`（默认即可），不需要额外添加 `-fopenmp`。
+- iOS 资源放置：将 `models/*.mllm` 与 `vocab/*.mllm` 放入 App Bundle，并在运行时复制到可写目录（如 `Documents`）。
+
+#### 3) Objective‑C++ 封装示例
+
+在 Swift 工程使用 C++ 需通过 ObjC++ 封装一个简单接口：
+
+`MLLMWrapper.h`
+```objc
+#import <Foundation/Foundation.h>
+
+@interface MLLMWrapper : NSObject
+- (instancetype)init;
+- (NSString *)generate:(NSString *)prompt
+                 model:(NSString *)modelPath
+                 vocab:(NSString *)vocabPath;
+@end
+```
+
+`MLLMWrapper.mm`（注意文件后缀为 `.mm` 以启用 ObjC++）：
+```objc
+#import "MLLMWrapper.h"
+#import <string>
+#import "mllm/Module.hpp"
+#import "mllm/Types.hpp"
+
+@implementation MLLMWrapper {
+    std::unique_ptr<mllm::Module> _module;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _module = std::make_unique<mllm::Module>();
+    }
+    return self;
+}
+
+- (NSString *)generate:(NSString *)prompt
+                 model:(NSString *)modelPath
+                 vocab:(NSString *)vocabPath {
+    using namespace mllm;
+    // 简化示例：加载模型与词表（参考 examples/demo_llama.cpp 的用法）
+    _module->load(modelPath.UTF8String, vocabPath.UTF8String);
+
+    std::string out;
+    _module->generate(std::string([prompt UTF8String]), out);
+    return [NSString stringWithUTF8String:out.c_str()];
+}
+@end
+```
+
+Swift 调用示例：
+```swift
+let wrapper = MLLMWrapper()
+let text = wrapper.generate("你好，介绍一下你自己。",
+                            model: Bundle.main.path(forResource: "llama-2-7b-chat-q4_k", ofType: "mllm")!,
+                            vocab: Bundle.main.path(forResource: "llama2_vocab", ofType: "mllm")!)
+print(text)
+```
+
+#### 4) 性能与注意事项
+
+- iOS 默认单线程执行（禁用 OpenMP），性能比 Linux/macOS 可能稍低；可在后续版本引入 GCD/`std::thread` 并行以提升速度。
+- 请确保模型与词表文件在设备可访问路径（Bundle → 拷贝到沙盒可写目录）。
+- 如需多模态（VLM），请链接 `libmllm_vlm.a` 并参照对应 demo 的输入流程。
+
+
 ## Customization
 
 ### Convert models
